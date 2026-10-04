@@ -11,6 +11,7 @@ from .idempotency import IdempotencyStore
 from .inbox import Inbox
 from .jobs import JobQueue
 from .ledger import Ledger
+from .logistics import LogisticsService
 from .outbox import Outbox
 from .repository import EntityRepository
 from .reservations import ReservationBook
@@ -27,17 +28,22 @@ class CivicFlow:
     ledger: Ledger
     reservations: ReservationBook
     jobs: JobQueue
+    logistics: LogisticsService
 
     @classmethod
     def open(cls, path: str | Path, *, fixed_now: str | None = None) -> "CivicFlow":
         database = Database(path); database.initialize(); clock = Clock(fixed_now)
         audit = AuditLog(clock); idempotency = IdempotencyStore(clock)
         repository = EntityRepository(database, clock, audit, idempotency)
-        return cls(database, clock, repository, Inbox(database, clock), Outbox(database, clock), Ledger(database, clock), ReservationBook(database), JobQueue(database, clock))
+        logistics = LogisticsService(database, clock, idempotency)
+        return cls(database, clock, repository, Inbox(database, clock), Outbox(database, clock),
+                   Ledger(database, clock), ReservationBook(database), JobQueue(database, clock), logistics)
 
     def verify(self) -> dict:
         with self.database.connect() as connection:
             audit_count = AuditLog(self.clock).verify(connection)
             entity_count = connection.execute("SELECT COUNT(*) AS n FROM entities").fetchone()["n"]
             conflict_count = connection.execute("SELECT COUNT(*) AS n FROM inbox_conflicts").fetchone()["n"]
-        return {"audit_entries": audit_count, "entities": entity_count, "inbox_conflicts": conflict_count}
+        conservation = self.logistics.verify_conservation()
+        return {"audit_entries": audit_count, "entities": entity_count, "inbox_conflicts": conflict_count,
+                "logistics": conservation}

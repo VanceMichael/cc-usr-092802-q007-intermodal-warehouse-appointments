@@ -28,10 +28,20 @@ class JobQueue:
             raise ValidationError("租约参数不合法")
         lease_until = (parse_instant(self.clock.now()) + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
         with self.database.transaction() as connection:
-            rows = connection.execute("SELECT * FROM scheduled_jobs WHERE run_at<=? AND status IN ('waiting','retry') AND (lease_until IS NULL OR lease_until<?) ORDER BY run_at,job_id LIMIT ?", (self.clock.now(), self.clock.now(), limit)).fetchall()
+            # 进程崩溃后，status='running' 但租约已过期的任务必须能被重新领取。
+            rows = connection.execute(
+                "SELECT * FROM scheduled_jobs WHERE run_at<=? AND "
+                "((status IN ('waiting','retry') AND (lease_until IS NULL OR lease_until<?)) "
+                "OR (status='running' AND lease_until IS NOT NULL AND lease_until<?)) "
+                "ORDER BY run_at,job_id LIMIT ?",
+                (self.clock.now(), self.clock.now(), self.clock.now(), limit)).fetchall()
             result = []
             for row in rows:
-                changed = connection.execute("UPDATE scheduled_jobs SET status='running',lease_until=?,attempt=attempt+1 WHERE job_id=? AND (lease_until IS NULL OR lease_until<?)", (lease_until, row["job_id"], self.clock.now())).rowcount
+                changed = connection.execute(
+                    "UPDATE scheduled_jobs SET status='running',lease_until=?,attempt=attempt+1 WHERE job_id=? AND "
+                    "((status IN ('waiting','retry') AND (lease_until IS NULL OR lease_until<?)) "
+                    "OR (status='running' AND lease_until IS NOT NULL AND lease_until<?))",
+                    (lease_until, row["job_id"], self.clock.now(), self.clock.now())).rowcount
                 if changed:
                     item = dict(row); item["lease_until"] = lease_until; result.append(item)
             return result
